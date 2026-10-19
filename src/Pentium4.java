@@ -1,43 +1,169 @@
 import javax.swing.*;
 import java.awt.*;
-
+import java.awt.geom.Rectangle2D;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Random;
 
 public class Pentium4 extends JFrame {
 
-    static final String[] PROG = {"MOV EAX, 5", "MOV EBX, 3", "ADD EAX, EBX", "MOV ECX, 10", "SUB ECX, 4", "IMUL EAX, ECX"};
-    static final String[] LABEL = {"Guardar 5 em EAX", "Guardar 3 em EBX", "Somar EAX + EBX", "Guardar 10 em ECX", "Subtrair 4 de ECX", "Multiplicar EAX por ECX"};
-    static final int[] DEST = {0, 1, 0, 2, 2, 0};
-    static final int[] VAL = {5, 3, 8, 10, 6, 48};
-    static final String[] REG = {"EAX", "EBX", "ECX", "EDX"};
-    static final String[] NAME = {"1. BUSCA", "2. DECODIFICA", "3. ESCALONA", "4. EXECUTA", "5. RETIRA"};
-    static final String[] DESC = {"Pega a instrução", "Traduz em passos", "Decide a ordem", "Faz a conta", "Guarda o resultado"};
-    static final String[] WHAT = {
-            "está sendo buscada na Trace Cache",
-            "está sendo decodificada",
-            "está no escalonador",
-            "está sendo executada na ALU",
-            "está sendo retirada: o resultado vai para o registrador"};
-    static final Color[] SC = {new Color(0x60A5FA), new Color(0xA78BFA), new Color(0xFBBF24), new Color(0x4ADE80), new Color(0xF472B6)};
-    static final Color BG = new Color(0x0F172A), PANEL = new Color(0x1E293B), FG = new Color(0xF1F5F9), MUTED = new Color(0x94A3B8);
+    static final Color BG = new Color(0x0F172A), PANEL = new Color(0x1E293B), FG = new Color(0xF1F5F9),
+            MUTED = new Color(0xCBD5E1), OK = new Color(0x166534), ERRO = new Color(0x991B1B),
+            VAZIA = new Color(0x0B1220), HIT = new Color(0x4ADE80), NOVA = new Color(0x38BDF8);
+    static final Color[] LC = {new Color(0x60A5FA), new Color(0xFBBF24), new Color(0xA78BFA)};
 
-    static class Board extends JPanel {
-        int cycle = 0;
-        double anim = 1.5;
-        boolean pipeline = true;
-        String speedText = "";
+    static class Cache {
+        final String nome, info;
+        final int sets, ways, lineBits, idxBits;
+        final int[][] tag;
+        final long[][] uso;
+        long t;
+        int acertos, erros, ultSet, ultVia;
+        boolean ultAcerto;
+        String ultimo = "";
 
-        Board() { setBackground(BG); }
+        Cache(String nome, String info, int sets, int ways, int lineBits) {
+            this.nome = nome; this.info = info; this.sets = sets; this.ways = ways; this.lineBits = lineBits;
+            idxBits = Integer.numberOfTrailingZeros(sets);
+            tag = new int[sets][ways]; uso = new long[sets][ways];
+            reset();
+        }
 
-        int start(int i) { return pipeline ? i + 1 : 5 * i + 1; }
-        int total() { return start(PROG.length - 1) + 4; }
-        int stageOf(int i, int c) { return c - start(i); }
-        Color color(int i) { return Color.getHSBColor(i * 0.16f, 0.55f, 0.98f); }
-        double ease(double t) { t = Math.max(0, Math.min(1, t)); return t * t * (3 - 2 * t); }
+        void reset() {
+            for (int[] l : tag) Arrays.fill(l, -1);
+            for (long[] l : uso) Arrays.fill(l, 0);
+            t = 0; acertos = 0; erros = 0; ultSet = -1; ultVia = -1; ultimo = "";
+        }
 
-        void text(Graphics2D g, String s, int x, int y, int maxW, int size, boolean bold, Color c, boolean center) {
-            int sz = size; Font f; FontMetrics fm;
-            do { f = new Font("SansSerif", bold ? Font.BOLD : Font.PLAIN, sz--); fm = g.getFontMetrics(f); } while (fm.stringWidth(s) > maxW && sz > 8);
-            g.setFont(f); g.setColor(c); g.drawString(s, center ? x - fm.stringWidth(s) / 2 : x, y);
+        boolean acessa(int addr) {
+            int s = (addr >>> lineBits) & (sets - 1), tg = addr >>> (lineBits + idxBits);
+            t++; ultSet = s;
+            for (int w = 0; w < ways; w++)
+                if (tag[s][w] == tg) { uso[s][w] = t; acertos++; ultVia = w; ultAcerto = true; return true; }
+            int v = 0;                                   // via livre ou menos usada (LRU)
+            for (int w = 1; w < ways; w++) if (uso[s][w] < uso[s][v]) v = w;
+            tag[s][v] = tg; uso[s][v] = t; erros++; ultVia = v; ultAcerto = false;
+            return false;
+        }
+
+        String divide(int a) {
+            return String.format("offset %d (%d bits) · índice %d (%d bits) · tag 0x%X (%d bits)",
+                    a & ((1 << lineBits) - 1), lineBits, (a >>> lineBits) & (sets - 1), idxBits,
+                    a >>> (lineBits + idxBits), 32 - lineBits - idxBits);
+        }
+    }
+
+    static class Painel extends JPanel {
+        final Cache tc = new Cache("Trace Cache", "12K µops · 8 vias · 256 conjuntos · 6 µops por linha", 256, 8, 5);
+        final Cache l1 = new Cache("L1 de dados", "8 KB · 4 vias · 32 conjuntos · linha de 64 B · write-through", 32, 4, 6);
+        final Cache l2 = new Cache("L2 unificada", "512 KB · 8 vias · 512 conjuntos · linha de 128 B · write-back", 512, 8, 7);
+        final Cache[] cs = {tc, l1, l2};
+        static final int[] COLS = {32, 8, 64};          // colunas do mapa de conjuntos
+        final int[] estado = new int[4];                // 0 neutro, 1 acerto, 2 erro (índice 3 = RAM)
+        final List<int[]> passos = new ArrayList<>();
+        int mostrados = 0, ramAcessos = 0;
+        boolean houve = false;
+        final javax.swing.Timer timer = new javax.swing.Timer(500, e -> proximo());
+
+        Painel() { setBackground(BG); setPreferredSize(new Dimension(1200, 640)); }
+
+        void reset() {
+            timer.stop();
+            for (Cache c : cs) c.reset();
+            Arrays.fill(estado, 0); passos.clear(); ramAcessos = 0; houve = false;
+            repaint();
+        }
+
+        void acesso(boolean busca, int addr) {
+            Cache primeira = busca ? tc : l1;
+            for (Cache c : cs) c.ultimo = "";
+            passos.clear(); Arrays.fill(estado, 0); mostrados = 0; houve = true;
+            primeira.ultimo = primeira.divide(addr);
+            boolean h1 = primeira.acessa(addr);
+            passos.add(new int[]{busca ? 0 : 1, h1 ? 1 : 2});
+            if (!h1) {
+                l2.ultimo = l2.divide(addr);
+                boolean h2 = l2.acessa(addr);
+                passos.add(new int[]{2, h2 ? 1 : 2});
+                if (!h2) { passos.add(new int[]{3, 1}); ramAcessos++; }
+            }
+            timer.restart();
+            repaint();
+        }
+
+        void proximo() {
+            if (mostrados < passos.size()) { int[] p = passos.get(mostrados++); estado[p[0]] = p[1]; }
+            if (mostrados >= passos.size()) timer.stop();
+            repaint();
+        }
+
+        void txt(Graphics2D g, String s, int cx, int y, int maxW, int size, boolean bold, Color c) {
+            int sz = Math.max(size, 9); Font f; FontMetrics fm;
+            do { f = new Font("SansSerif", bold ? Font.BOLD : Font.PLAIN, sz--); fm = g.getFontMetrics(f); }
+            while (fm.stringWidth(s) > maxW && sz > 8);
+            g.setFont(f); g.setColor(c); g.drawString(s, cx - fm.stringWidth(s) / 2, y);
+        }
+
+        void seta(Graphics2D g, int x1, int y1, int x2, int y2) {
+            g.setColor(Color.GRAY); g.setStroke(new BasicStroke(3f));
+            g.drawLine(x1, y1, x2, y2);
+            double a = Math.atan2(y2 - y1, x2 - x1);
+            g.fillPolygon(new int[]{x2, (int) (x2 - 14 * Math.cos(a - 0.45)), (int) (x2 - 14 * Math.cos(a + 0.45))},
+                    new int[]{y2, (int) (y2 - 14 * Math.sin(a - 0.45)), (int) (y2 - 14 * Math.sin(a + 0.45))}, 3);
+        }
+
+        void fundo(Graphics2D g, int i, Rectangle r, Color borda) {
+            g.setColor(estado[i] == 1 ? OK : estado[i] == 2 ? ERRO : PANEL);
+            g.fillRoundRect(r.x, r.y, r.width, r.height, 28, 28);
+            g.setColor(borda); g.setStroke(new BasicStroke(3f));
+            g.drawRoundRect(r.x, r.y, r.width, r.height, 28, 28);
+        }
+
+        void caixaCache(Graphics2D g, int i, Rectangle r) {
+            Cache c = cs[i];
+            fundo(g, i, r, LC[i]);
+            int cx = r.x + r.width / 2, mw = r.width - 30, ts = Math.max(14, Math.min(30, r.height / 11));
+            String suf = estado[i] == 1 ? " · ACERTO" : estado[i] == 2 ? " · ERRO" : "";
+            String taxa = c.acertos + c.erros == 0 ? "-" : String.format("%.1f%%", 100.0 * c.acertos / (c.acertos + c.erros));
+            txt(g, c.nome + suf, cx, r.y + (int) (r.height * 0.11), mw, ts, true, FG);
+            txt(g, c.info, cx, r.y + (int) (r.height * 0.18), mw, ts * 3 / 5, false, MUTED);
+            txt(g, "Acertos " + c.acertos + " · Erros " + c.erros + " · Taxa de acerto " + taxa,
+                    cx, r.y + (int) (r.height * 0.26), mw, ts * 2 / 3, true, FG);
+            mapa(g, i, r.x + (int) (r.width * 0.06), r.y + (int) (r.height * 0.31), (int) (r.width * 0.88), (int) (r.height * 0.48));
+            String det = !c.ultimo.isEmpty() ? c.ultimo : houve ? "Não consultada neste acesso" : "Nenhum acesso ainda";
+            txt(g, det, cx, r.y + (int) (r.height * 0.89), mw, ts * 2 / 3, false, FG);
+        }
+
+        void mapa(Graphics2D g, int i, int x, int y, int w, int h) {
+            Cache c = cs[i];
+            int cols = COLS[i], rows = (c.sets + cols - 1) / cols;
+            double cw = (double) w / cols, ch = (double) h / rows;
+            g.setColor(VAZIA); g.fillRect(x - 3, y - 3, w + 6, h + 6);
+            for (int s = 0; s < c.sets; s++) {
+                double cx = x + (s % cols) * cw, cy = y + (s / cols) * ch;
+                for (int v = 0; v < c.ways; v++) {
+                    double sw = cw / c.ways;
+                    g.setColor(c.tag[s][v] < 0 ? new Color(0x16213A) : LC[i]);
+                    g.fill(new Rectangle2D.Double(cx + sw * v, cy, Math.max(1, sw - (sw > 3 ? 1 : 0)), Math.max(1, ch - (ch > 4 ? 2 : 0))));
+                }
+            }
+            if (estado[i] != 0 && c.ultSet >= 0) {   // destaca o conjunto e a via do último acesso
+                int s = c.ultSet;
+                double cx = x + (s % cols) * cw, cy = y + (s / cols) * ch, sw = cw / c.ways;
+                g.setColor(c.ultAcerto ? HIT : NOVA);
+                g.fill(new Rectangle2D.Double(cx + sw * c.ultVia, cy, Math.max(2, sw), Math.max(1, ch - 2)));
+                g.setColor(Color.WHITE); g.setStroke(new BasicStroke(2f));
+                g.draw(new Rectangle2D.Double(cx - 1, cy - 1, cw + 1, ch));
+            }
+        }
+
+        void caixaRam(Graphics2D g, Rectangle r) {
+            fundo(g, 3, r, Color.LIGHT_GRAY);
+            int cx = r.x + r.width / 2, mw = r.width - 30, ts = Math.max(14, Math.min(30, r.height / 7));
+            txt(g, "Memória RAM" + (estado[3] == 1 ? " · LIDA" : ""), cx, r.y + (int) (r.height * 0.32), mw, ts, true, FG);
+            txt(g, "via barramento FSB", cx, r.y + (int) (r.height * 0.50), mw, ts * 3 / 5, false, MUTED);
+            txt(g, "Leituras: " + ramAcessos, cx, r.y + (int) (r.height * 0.70), mw, ts * 2 / 3, true, FG);
         }
 
         @Override
@@ -46,187 +172,61 @@ public class Pentium4 extends JFrame {
             Graphics2D g = (Graphics2D) g0;
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
-            int W = getWidth(), H = getHeight(), n = PROG.length;
-            double a = ease(anim);
+            int W = getWidth(), H = getHeight(), m = 30, gap = 70, gv = 30;
+            int usable = W - 2 * m - 2 * gap, wL = (int) (usable * 0.38), wM = (int) (usable * 0.42), wR = usable - wL - wM;
+            int hh = H - 2 * m - 20, hL = (hh - gv) / 2;
+            Rectangle rTc = new Rectangle(m, m, wL, hL), rL1 = new Rectangle(m, m + hL + gv, wL, hL),
+                    rL2 = new Rectangle(m + wL + gap, m, wM, hh), rRam = new Rectangle(m + wL + gap + wM + gap, m + hh / 4, wR, hh / 2);
 
-            text(g, "PENTIUM 4: a viagem de uma instrução pelo processador", W / 2, 34, W - 40, 28, true, FG, true);
-            text(g, pipeline ? "MODO: COM PIPELINE (linha de montagem: várias instruções ao mesmo tempo)"
-                            : "MODO: SEM PIPELINE (uma instrução por vez, o resto fica parado)", W / 2, 62, W - 40, 18, true,
-                    pipeline ? new Color(0x4ADE80) : new Color(0xF87171), true);
+            seta(g, rTc.x + rTc.width, rTc.y + rTc.height / 2, rL2.x, rTc.y + rTc.height / 2);
+            seta(g, rL1.x + rL1.width, rL1.y + rL1.height / 2, rL2.x, rL1.y + rL1.height / 2);
+            seta(g, rL2.x + rL2.width, m + hh / 2, rRam.x, m + hh / 2);
+            caixaCache(g, 0, rTc); caixaCache(g, 1, rL1); caixaCache(g, 2, rL2); caixaRam(g, rRam);
 
-            int mg = 30, gap = 44, bw = (W - 2 * mg - 4 * gap) / 5, by = 80, bh = 170;
-            boolean[] busy = new boolean[5];
-            for (int i = 0; i < n; i++) { int s = stageOf(i, cycle); if (s >= 0 && s <= 4) busy[s] = true; }
-            for (int s = 0; s < 5; s++) {
-                int x = mg + s * (bw + gap);
-                g.setColor(busy[s] ? SC[s] : PANEL);
-                g.fillRoundRect(x, by, bw, bh, 24, 24);
-                g.setColor(SC[s]); g.setStroke(new BasicStroke(3f));
-                g.drawRoundRect(x, by, bw, bh, 24, 24);
-                text(g, NAME[s], x + bw / 2, by + 30, bw - 16, 20, true, busy[s] ? BG : SC[s], true);
-                text(g, DESC[s], x + bw / 2, by + 52, bw - 16, 14, false, busy[s] ? BG : MUTED, true);
-                if (s < 4) {
-                    int ax = x + bw + 6, ay = by + bh / 2;
-                    g.setColor(MUTED); g.setStroke(new BasicStroke(4f));
-                    g.drawLine(ax, ay, ax + gap - 18, ay);
-                    g.fillPolygon(new int[]{ax + gap - 8, ax + gap - 20, ax + gap - 20}, new int[]{ay, ay - 8, ay + 8}, 3);
-                }
+            // legenda
+            Color[] lc = {new Color(0x16213A), LC[1], HIT, NOVA};
+            String[] lt = {"via vazia", "via ocupada", "acerto (via lida)", "linha nova após erro (via gravada)"};
+            int lx = m, ly = H - 12;
+            for (int k = 0; k < 4; k++) {
+                g.setColor(lc[k]); g.fillRect(lx, ly - 11, 14, 14);
+                g.setColor(Color.GRAY); g.setStroke(new BasicStroke(1f)); g.drawRect(lx, ly - 11, 14, 14);
+                g.setFont(new Font("SansSerif", Font.PLAIN, 13)); g.setColor(MUTED); g.drawString(lt[k], lx + 20, ly);
+                lx += 40 + g.getFontMetrics().stringWidth(lt[k]);
             }
-
-            for (int i = 0; i < n; i++) {
-                int s = stageOf(i, cycle), p = stageOf(i, cycle - 1);
-                if (s < 0 || s > 5) continue;
-                double fromX = (p >= 0 && p <= 4) ? mg + p * (bw + gap) : mg - (bw + gap);
-                double toX = mg + Math.min(s, 5) * (bw + gap);
-                double x = fromX + (toX - fromX) * a;
-                float alpha = 1f;
-                if (s == 5) alpha = (float) (1 - a);
-                if (p < 0) alpha = (float) a;
-                if (alpha <= 0.02f) continue;
-                int cw = bw - 28, ch = 74, cy = by + 78;
-                g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, alpha));
-                g.setColor(color(i)); g.fillRoundRect((int) x + 14, cy, cw, ch, 16, 16);
-                g.setColor(BG); g.setStroke(new BasicStroke(2f)); g.drawRoundRect((int) x + 14, cy, cw, ch, 16, 16);
-                text(g, "Instrução #" + (i + 1), (int) x + 14 + cw / 2, cy + 18, cw - 10, 13, false, new Color(0x334155), true);
-                text(g, LABEL[i], (int) x + 14 + cw / 2, cy + 41, cw - 10, 18, true, BG, true);
-                text(g, "(" + PROG[i] + ")", (int) x + 14 + cw / 2, cy + 62, cw - 10, 13, false, new Color(0x334155), true);
-                g.setComposite(AlphaComposite.SrcOver);
-            }
-
-            int ry = by + bh + 22;
-            int[] reg = new int[4];
-            boolean[] flash = new boolean[4];
-            for (int i = 0; i < n; i++) {
-                int s = stageOf(i, cycle);
-                if (s >= 4) { reg[DEST[i]] = VAL[i]; if (s == 4) flash[DEST[i]] = true; }
-            }
-            text(g, "REGISTRADORES (gavetas onde o processador guarda números)", mg, ry + 4, 600, 16, true, MUTED, false);
-            int rw = 130;
-            for (int r = 0; r < 4; r++) {
-                int x = mg + r * (rw + 16), y = ry + 14;
-                g.setColor(flash[r] ? new Color(0x16A34A) : PANEL); g.fillRoundRect(x, y, rw, 70, 16, 16);
-                g.setColor(SC[3]); g.setStroke(new BasicStroke(2f)); g.drawRoundRect(x, y, rw, 70, 16, 16);
-                text(g, REG[r], x + rw / 2, y + 22, rw, 16, true, MUTED, true);
-                text(g, String.valueOf(reg[r]), x + rw / 2, y + 56, rw, 34, true, flash[r] ? Color.WHITE : new Color(0xFDE68A), true);
-            }
-            int done = 0;
-            for (int i = 0; i < n; i++) if (stageOf(i, cycle) >= 5 || (stageOf(i, cycle) == 4 && anim >= 1)) done++;
-            int px = mg + 4 * (rw + 16) + 30;
-            text(g, "CICLO: " + cycle, px, ry + 34, 300, 30, true, FG, false);
-            text(g, "Instruções prontas: " + done + " de " + n, px, ry + 58, 400, 20, false, FG, false);
-            text(g, "Total neste modo: " + total() + " ciclos", px, ry + 80, 400, 20, true, pipeline ? new Color(0x4ADE80) : new Color(0xF87171), false);
-            text(g, "Velocidade: " + speedText, px, ry + 102, 450, 17, true, new Color(0xFBBF24), false);
-
-            int ty = ry + 124;
-            text(g, "LINHA DO TEMPO  |  linha = instrução, coluna = ciclo  |  número na célula = fase: 1 Busca, 2 Decodifica, 3 Escalona, 4 Executa, 5 Retira", mg, ty + 4, W - 60, 16, true, MUTED, false);
-            int leftW = 370, maxC = 30, cell = Math.min(44, (W - 2 * mg - leftW) / maxC), rh = 30;
-            for (int c = 1; c <= total(); c++)
-                text(g, String.valueOf(c), mg + leftW + (c - 1) * cell + cell / 2, ty + 26, cell, 12, true, c == cycle ? Color.WHITE : MUTED, true);
-            for (int i = 0; i < n; i++) {
-                int y = ty + 30 + i * (rh + 4);
-                g.setColor(color(i)); g.fillRoundRect(mg, y, 14, rh, 6, 6);
-                text(g, "#" + (i + 1) + "  " + LABEL[i], mg + 22, y + 21, 235, 16, true, FG, false);
-                text(g, PROG[i], mg + 262, y + 21, leftW - 266, 13, false, MUTED, false);
-                for (int c = 1; c <= cycle; c++) {
-                    int s = stageOf(i, c);
-                    if (s < 0 || s > 4) continue;
-                    int x = mg + leftW + (c - 1) * cell;
-                    g.setColor(SC[s]); g.fillRoundRect(x + 1, y, cell - 2, rh, 8, 8);
-                    text(g, String.valueOf(s + 1), x + cell / 2, y + 21, cell - 4, 16, true, BG, true);
-                }
-            }
-            if (cycle > 0) {
-                g.setColor(Color.WHITE); g.setStroke(new BasicStroke(2f));
-                g.drawRect(mg + leftW + (cycle - 1) * cell, ty + 14, cell, n * (rh + 4) + 18);
-            }
-
-            int ey = ty + 30 + n * (rh + 4) + 22;
-            if (cycle > 0) { g.setColor(new Color(0x1E3A5F)); g.fillRoundRect(mg, ey - 20, W - 2 * mg, H - ey - 6, 16, 16); }
-            int ly = ey + 4;
-            if (cycle == 0) {
-                // sem mensagem inicial
-            } else if (cycle >= total()) {
-                text(g, "TERMINOU! Resultado final: EAX = 48.", mg + 14, ly + 6, W - 80, 22, true, new Color(0x86EFAC), false);
-                text(g, "Com pipeline: " + (PROG.length + 4) + " ciclos  |  Sem pipeline: " + 5 * PROG.length + " ciclos.  Troque o modo e compare!", mg + 14, ly + 38, W - 80, 20, true, FG, false);
-                text(g, "Isso acontece porque, na linha de montagem, cada fase trabalha numa instrução diferente ao mesmo tempo.", mg + 14, ly + 66, W - 80, 17, false, MUTED, false);
-            } else {
-                int line = 0;
-                for (int i = 0; i < n; i++) {
-                    int s = stageOf(i, cycle);
-                    if (s < 0 || s > 4) continue;
-                    g.setColor(color(i)); g.fillOval(mg + 14, ly + line * 26 - 8, 16, 16);
-                    text(g, PROG[i] + "  " + WHAT[s], mg + 40, ly + line * 26 + 6, W - 110, 19, false, FG, false);
-                    line++;
-                }
-                if (line == 0) text(g, "Nenhuma instrução em andamento.", mg + 14, ly + 6, W - 80, 19, false, FG, false);
-            }
+            g.drawString("Cada bloco do mapa é um conjunto; cada faixa dentro dele é uma via.", lx + 20, ly);
         }
     }
 
-    final Board board = new Board();
-    final javax.swing.Timer timer;
-    boolean auto = false;
-    final JSlider speed = new JSlider(1, 10, 5);
-    final JLabel speedLbl = new JLabel();
-    final JButton btnAuto = new JButton("Automático");
+    final Painel painel = new Painel();
+    final JTextField campo = new JTextField("0x00100000", 10);
 
     Pentium4() {
-        super("Pentium 4 - Simulação Simples");
+        super("Cache do Pentium 4");
         setDefaultCloseOperation(EXIT_ON_CLOSE);
-        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 8));
-        bar.setBackground(PANEL);
-        JButton next = new JButton("Próximo ciclo"), reset = new JButton("Reiniciar"), mode = new JButton("Trocar: com / sem pipeline");
-        speed.setMajorTickSpacing(1); speed.setPaintTicks(true); speed.setSnapToTicks(true);
-        speed.setPreferredSize(new Dimension(220, 40));
-        java.util.Hashtable<Integer, JLabel> lt = new java.util.Hashtable<>();
-        lt.put(1, new JLabel("Lenta")); lt.put(5, new JLabel("Média")); lt.put(10, new JLabel("Rápida"));
-        for (JLabel x : lt.values()) x.setForeground(FG);
-        speed.setLabelTable(lt); speed.setPaintLabels(true);
-        for (JButton b : new JButton[]{next, btnAuto, reset, mode}) { b.setFont(b.getFont().deriveFont(Font.BOLD, 16f)); bar.add(b); }
-        JLabel l = new JLabel("Velocidade:"); l.setForeground(FG); l.setFont(l.getFont().deriveFont(Font.BOLD, 15f));
-        bar.add(l); bar.add(speed); speed.setOpaque(false);
-        speedLbl.setForeground(new Color(0xFBBF24)); speedLbl.setFont(speedLbl.getFont().deriveFont(Font.BOLD, 15f)); bar.add(speedLbl);
-        speed.addChangeListener(e -> updateSpeed());
-        updateSpeed();
-        add(bar, BorderLayout.NORTH);
-        add(board, BorderLayout.CENTER);
+        JButton bLer = new JButton("Ler dado"), bBuscar = new JButton("Buscar instrução"),
+                bAleat = new JButton("Endereço aleatório"), bReset = new JButton("Reiniciar");
+        JPanel barra = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 8));
+        barra.add(new JLabel("Endereço (hex):")); barra.add(campo);
+        barra.add(bLer); barra.add(bBuscar); barra.add(bAleat); barra.add(bReset);
+        add(barra, BorderLayout.NORTH);
+        add(painel, BorderLayout.CENTER);
 
-        next.addActionListener(e -> { setAuto(false); step(); });
-        btnAuto.addActionListener(e -> setAuto(!auto));
-        reset.addActionListener(e -> { setAuto(false); board.cycle = 0; board.anim = 1.5; board.repaint(); });
-        mode.addActionListener(e -> { setAuto(false); board.pipeline = !board.pipeline; board.cycle = 0; board.anim = 1.5; board.repaint(); });
-
-        timer = new javax.swing.Timer(16, e -> {
-            double dur = durMs();
-            if (board.anim < 1.4) board.anim += 16.0 / dur * 1.4;
-            if (auto && board.anim >= 1.4) step();
-            board.repaint();
-        });
-        timer.start();
-        setSize(1280, 900);
+        bLer.addActionListener(e -> acesso(false));
+        bBuscar.addActionListener(e -> acesso(true));
+        campo.addActionListener(e -> acesso(false));
+        bAleat.addActionListener(e -> campo.setText(String.format("0x%08X", new Random().nextInt(1 << 22) & ~3)));
+        bReset.addActionListener(e -> painel.reset());
+        setSize(1280, 760);
         setLocationRelativeTo(null);
     }
 
-    int durMs() { return 1700 - speed.getValue() * 150; } // tempo de cada ciclo, em ms
-
-    void updateSpeed() {
-        int v = speed.getValue();
-        String t = (v <= 3 ? "Lenta" : v <= 7 ? "Média" : "Rápida") + " (" + String.format("%.2f", durMs() / 1000.0) + " s por ciclo)";
-        speedLbl.setText(t);
-        board.speedText = t;
-        board.repaint();
-    }
-
-    void step() {
-        if (board.cycle >= board.total()) { setAuto(false); return; }
-        board.cycle++;
-        board.anim = 0;
-    }
-
-    void setAuto(boolean on) {
-        auto = on;
-        btnAuto.setText(on ? "Pausar" : "Automático");
-        if (on && board.cycle >= board.total()) { board.cycle = 0; board.anim = 1.5; }
+    void acesso(boolean busca) {
+        try {
+            int addr = (int) Long.parseLong(campo.getText().trim().replaceFirst("^0[xX]", ""), 16);
+            painel.acesso(busca, addr);
+        } catch (NumberFormatException ex) {
+            JOptionPane.showMessageDialog(this, "Endereço inválido: use hexadecimal (ex.: 0x00100040).");
+        }
     }
 
 }
